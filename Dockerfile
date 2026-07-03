@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Bento4 (mp4decrypt)
 RUN mkdir -p /tmp/bento4 && \
-    curl -L https://www.bento4.com/files/Bento4-SDK-1-6-0-641.x86_64-unknown-linux.zip -o /tmp/bento4.zip && \
+    curl -L https://www.bok.net/Bento4/binaries/Bento4-SDK-1-6-0-641.x86_64-unknown-linux.zip -o /tmp/bento4.zip
     unzip /tmp/bento4.zip -d /tmp/bento4 && \
     mv /tmp/bento4/Bento4-SDK-1-6-0-641.x86_64-unknown-linux/bin/mp4decrypt /usr/local/bin/mp4decrypt && \
     chmod +x /usr/local/bin/mp4decrypt && \
