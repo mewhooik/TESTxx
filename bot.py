@@ -9,8 +9,8 @@ from pyrogram.types import Message
 
 # Get credentials from environment
 API_ID = 29136894
-API_HASH = 88f3d07b70de48ac1fc13866b0c9e562
-BOT_TOKEN = 8097075190:AAHt7EPlitFrj_peJ7yPPZezd7Isk_B3xFk
+API_HASH = "88f3d07b70de48ac1fc13866b0c9e562"
+BOT_TOKEN = "8097075190:AAHt7EPlitFrj_peJ7yPPZezd7Isk_B3xFk"
 
 if not all([API_ID, API_HASH, BOT_TOKEN]):
     raise ValueError("API_ID, API_HASH, and BOT_TOKEN must be set in environment variables!")
