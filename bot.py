@@ -8,12 +8,12 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 
 # Get credentials from environment
-API_ID = int(os.environ.get("API_ID", "29136894"))
-API_HASH = os.environ.get("API_HASH", "88f3d07b70de48ac1fc13866b0c9e562")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8097075190:AAHt7EPlitFrj_peJ7yPPZezd7Isk_B3xFk")
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-if not API_ID or not API_HASH or not BOT_TOKEN:
-    print("WARNING: API_ID, API_HASH, or BOT_TOKEN missing in environment!")
+if not all([API_ID, API_HASH, BOT_TOKEN]):
+    raise ValueError("API_ID, API_HASH, and BOT_TOKEN must be set in environment variables!")
 
 app = Client(
     "clearkey_bot",
@@ -32,29 +32,44 @@ def format_size(bytes_count: float) -> str:
     s = round(bytes_count / p, 2)
     return f"{s} {suffixes[i]}"
 
-async def run_command(cmd: list) -> tuple:
-    loop = asyncio.get_event_loop()
-    res = await loop.run_in_executor(
-        None, lambda: subprocess.run(cmd, capture_output=True, text=True)
-    )
-    return res.returncode, res.stdout, res.stderr
+async def run_command(cmd: list, timeout: int = 300) -> tuple:
+    """Run command with timeout to prevent hanging"""
+    try:
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(
+            None, 
+            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        )
+        return res.returncode, res.stdout, res.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", "Command timed out"
+    except Exception as e:
+        return -1, "", str(e)
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
     await message.reply_text(
-        "👋 Welcome! I am a Lite ClearKey Downloader Bot.\n\n"
+        "👋 **Welcome to Lite ClearKey Downloader Bot**\n\n"
         "Send me a link in the following format:\n"
-        "`https://example.com/manifest.mpd*KID:KEY`"
+        "`https://example.com/manifest.mpd*KID:KEY`\n\n"
+        "⚠️ Note: Max file size supported is 2GB."
     )
 
 @app.on_message(filters.text & filters.private)
 async def process_link(client: Client, message: Message):
     text = message.text.strip()
+    
+    # Validate format
     if "*" not in text:
         await message.reply_text("❌ Invalid format. Please use: `url*KID:KEY`")
         return
         
-    url, key_pair = text.split("*", 1)
+    parts = text.split("*", 1)
+    if len(parts) != 2:
+        await message.reply_text("❌ Invalid format. Only one '*' allowed.")
+        return
+        
+    url, key_pair = parts
     url = url.strip()
     key_pair = key_pair.strip()
     
@@ -70,92 +85,104 @@ async def process_link(client: Client, message: Message):
     os.makedirs(temp_dir, exist_ok=True)
     
     try:
-        # 1. Download encrypted streams using yt-dlp
-        await status.edit_text("📥 Downloading encrypted video & audio streams using yt-dlp...")
+        kid, key = key_pair.split(":", 1)
         
-        # Download best video (encrypted)
+        # 1. Download encrypted streams using yt-dlp
+        await status.edit_text("📥 Downloading encrypted streams...")
+        
         video_enc = os.path.join(temp_dir, "video_enc.mp4")
+        audio_enc = os.path.join(temp_dir, "audio_enc.m4a")
+        
+        # Try downloading best video and audio separately
+        # Note: For some MPDs, yt-dlp might need specific headers or cookies
         video_cmd = [
             "yt-dlp",
-            "-f", "bestvideo",
+            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
             "--allow-unplayable-formats",
-            "-o", video_enc,
+            "--no-playlist",
+            "-o", os.path.join(temp_dir, "%(format_id)s.%(ext)s"),
             url
         ]
-        rc_v, out_v, err_v = await run_command(video_cmd)
-        if rc_v != 0 or not os.path.exists(video_enc):
-            # Try downloading best single format in case separate video format is not found
-            video_cmd_fallback = [
-                "yt-dlp",
-                "--allow-unplayable-formats",
-                "-o", video_enc,
-                url
-            ]
-            await run_command(video_cmd_fallback)
+        
+        rc_v, out_v, err_v = await run_command(video_cmd, timeout=600)
+        
+        # Check what files were downloaded
+        downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(('.mp4', '.m4a', '.webm'))]
+        
+        if not downloaded_files:
+            await status.edit_text("❌ Download failed. yt-dlp could not fetch streams.\nCheck if the URL is accessible.")
+            return
+
+        # Identify video and audio files
+        video_file = None
+        audio_file = None
+        
+        for f in downloaded_files:
+            path = os.path.join(temp_dir, f)
+            size = os.path.getsize(path)
+            if size < 1024: # Skip tiny files
+                continue
+            if 'video' in f.lower() or f.endswith('.mp4'):
+                video_file = path
+            elif 'audio' in f.lower() or f.endswith('.m4a'):
+                audio_file = path
+        
+        # Fallback: If only one file found, treat it as video
+        if not video_file and downloaded_files:
+            video_file = os.path.join(temp_dir, downloaded_files[0])
             
-        # Download best audio (encrypted)
-        audio_enc = os.path.join(temp_dir, "audio_enc.m4a")
-        audio_cmd = [
-            "yt-dlp",
-            "-f", "bestaudio",
-            "--allow-unplayable-formats",
-            "-o", audio_enc,
-            url
-        ]
-        rc_a, _, _ = await run_command(audio_cmd)
-        
-        # Determine if we have separate audio/video or just a single file
-        has_audio = os.path.exists(audio_enc) and os.path.getsize(audio_enc) > 1024
-        
-        if not os.path.exists(video_enc):
-            await status.edit_text("❌ Download failed. yt-dlp was unable to fetch the streams.")
+        if not video_file:
+            await status.edit_text("❌ No valid video file found after download.")
             return
 
         # 2. Decrypt using mp4decrypt
-        await status.edit_text("🔑 Decrypting streams using mp4decrypt...")
+        await status.edit_text("🔑 Decrypting streams...")
+        
         video_dec = os.path.join(temp_dir, "video_dec.mp4")
+        dec_v_cmd = ["mp4decrypt", "--key", f"{kid}:{key}", video_file, video_dec]
+        rc_dv, _, err_dv = await run_command(dec_v_cmd, timeout=300)
         
-        # Split key pair to pass to mp4decrypt
-        kid, key = key_pair.split(":", 1)
-        
-        # Decrypt video
-        dec_v_cmd = ["mp4decrypt", "--key", f"{kid}:{key}", video_enc, video_dec]
-        rc_dv, _, err_dv = await run_command(dec_v_cmd)
         if rc_dv != 0 or not os.path.exists(video_dec) or os.path.getsize(video_dec) < 100:
-            await status.edit_text(f"❌ Video decryption failed. Verify KID:KEY.\nError: {err_dv}")
+            await status.edit_text(f"❌ Video decryption failed.\nError: {err_dv[:200]}")
             return
             
-        # Decrypt audio if exists
-        video_final = video_dec
-        if has_audio:
+        final_video = video_dec
+        
+        # Decrypt audio if available
+        if audio_file:
             audio_dec = os.path.join(temp_dir, "audio_dec.m4a")
-            dec_a_cmd = ["mp4decrypt", "--key", f"{kid}:{key}", audio_enc, audio_dec]
-            rc_da, _, _ = await run_command(dec_a_cmd)
+            dec_a_cmd = ["mp4decrypt", "--key", f"{kid}:{key}", audio_file, audio_dec]
+            rc_da, _, _ = await run_command(dec_a_cmd, timeout=300)
             
             if rc_da == 0 and os.path.exists(audio_dec) and os.path.getsize(audio_dec) > 100:
-                # 3. Merge decrypted video and audio using ffmpeg
-                await status.edit_text("🔄 Muxing decrypted streams using FFmpeg...")
+                # 3. Merge decrypted video and audio
+                await status.edit_text("🔄 Muxing streams...")
                 merged_output = os.path.join(temp_dir, "final_output.mp4")
                 mux_cmd = [
                     "ffmpeg", "-y",
                     "-i", video_dec,
                     "-i", audio_dec,
                     "-c", "copy",
+                    "-movflags", "+faststart",
                     merged_output
                 ]
-                rc_m, _, _ = await run_command(mux_cmd)
+                rc_m, _, err_m = await run_command(mux_cmd, timeout=300)
                 if rc_m == 0 and os.path.exists(merged_output):
-                    video_final = merged_output
+                    final_video = merged_output
+
+        # Check file size before upload (Telegram limit: 2GB)
+        file_size = os.path.getsize(final_video)
+        if file_size > 2 * 1024 * 1024 * 1024:
+            await status.edit_text(f"❌ File too large ({format_size(file_size)}). Telegram bot limit is 2GB.")
+            return
 
         # 4. Upload to Telegram
-        await status.edit_text("☁️ Uploading final file to Telegram...")
+        await status.edit_text("☁️ Uploading to Telegram...")
         
-        # Calculate size & name
-        final_filename = f"Decrypted_Video_{task_id}.mp4"
+        final_filename = f"Decrypted_{task_id}.mp4"
         final_path = os.path.join(temp_dir, final_filename)
-        os.rename(video_final, final_path)
-        
-        file_size = os.path.getsize(final_path)
+        if final_video != final_path:
+            os.rename(final_video, final_path)
         
         start_time = time.time()
         last_update = start_time
@@ -168,7 +195,7 @@ async def process_link(client: Client, message: Message):
                 speed = current / (now - start_time) if now - start_time > 0 else 0
                 try:
                     await status.edit_text(
-                        f"☁️ **Uploading final file…**\n"
+                        f"☁️ **Uploading…**\n"
                         f"├ ⚡️ Progress: {pct:.1f}%\n"
                         f"├ 📈 Size: {format_size(current)} of {format_size(total)}\n"
                         f"├ 🚀 Speed: {format_size(speed)}/s"
@@ -180,18 +207,18 @@ async def process_link(client: Client, message: Message):
         await client.send_video(
             chat_id=message.chat.id,
             video=final_path,
-            caption=f"🎥 **Decrypted Stream Output**\n\n• Link: `{url}`\n• Key: `{key_pair}`",
+            caption=f"🎥 **Decrypted Output**\n\n• Key: `{key_pair}`",
             supports_streaming=True,
             progress=progress
         )
         await status.delete()
         
     except Exception as e:
-        await status.edit_text(f"❌ An error occurred: {e}")
+        await status.edit_text(f"❌ Error: {str(e)[:500]}")
     finally:
         # Cleanup
         try:
-            shutil.rmtree(temp_dir)
+            shutil.rmtree(temp_dir, ignore_errors=True)
         except:
             pass
 
