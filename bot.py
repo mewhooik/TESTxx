@@ -207,7 +207,7 @@ async def process_link(client: Client, message: Message):
         await client.send_video(
             chat_id=message.chat.id,
             video=final_path,
-            caption=f"🎥 **Decrypted Output**\n\n• Key: `{key_pair}`",
+            caption=f"🎥 **Decrypted Output**\n\n",
             supports_streaming=True,
             progress=progress
         )
