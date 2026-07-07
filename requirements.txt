@@ -1,5 +1,0 @@
-pyrogram
-tgcrypto
-yt-dlp
-aiohttp
-requests
